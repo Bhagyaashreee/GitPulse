@@ -1,0 +1,49 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+.env/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases & storage (never commit local SQLite runtime DBs)
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# Data directories (keep directory structure tracked via .gitkeep, ignore runtime generated data)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Secrets, API tokens, and local configuration
+.env
+*.env
+*.secret
+*.key
+*.pem
+token*.txt
+.streamlit/secrets.toml
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary and log files
+*.log
+*.tmp
+*.bak
+
+# OS specific files
+Thumbs.db
+.DS_Store

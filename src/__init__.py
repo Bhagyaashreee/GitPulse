@@ -1,0 +1,1 @@
+"""GitPulse core source package."""
