@@ -34,7 +34,7 @@ The entire system runs on a local machine, using only the unauthenticated GitHub
   - Search and filter controls by name, language, and minimum stars.
   - Real-time **Refresh Analytics** button that recalculates metrics and updates CSV files on demand.
   - Safeguards for empty databases with copy-paste setup instructions.
-- **Comprehensive Test Suite (`tests/`)**: 29 automated tests verifying ingestion, database constraints, transformations, data quality, and dashboard data loading using isolated temporary databases (`tmp_path`).
+- **Comprehensive Test Suite (`tests/`)**: 32 automated tests verifying ingestion, database constraints, transformations, data quality, and dashboard data loading using isolated temporary databases (`tmp_path`).
 
 ---
 
@@ -200,9 +200,52 @@ streamlit run src/dashboard.py
 
 ---
 
+## ☁️ Streamlit Community Cloud Deployment
+
+GitPulse is ready for 100% free, zero-cost cloud deployment on [Streamlit Community Cloud](https://streamlit.io/cloud).
+
+### Deployment Configuration Parameters
+
+When setting up your application in Streamlit Community Cloud, enter:
+
+| Setting Field | Value |
+| :--- | :--- |
+| **Repository** | `Bhagyaashreee/GitPulse` |
+| **Branch** | `main` |
+| **Main file path** | `src/dashboard.py` |
+| **Python Version** | `3.12` |
+| **App URL** | *Customizable (e.g., `https://gitpulse.streamlit.app`)* |
+
+### 🚀 Step-by-Step Cloud Deployment
+
+1. **Push your code to GitHub:**
+   Ensure your changes are committed and pushed to the `main` branch of your repository:
+   ```powershell
+   git status
+   git add src/ tests/ README.md
+   git commit -m "Prepare GitPulse for Streamlit Community Cloud deployment"
+   git push origin main
+   ```
+2. **Access Streamlit Community Cloud:**
+   Visit [share.streamlit.io](https://share.streamlit.io/) and click **Continue with GitHub**.
+3. **Create a New App:**
+   Click the **"Create app"** button (or **"New app"**), then select **"I already have an app"**.
+4. **Enter Application Details:**
+   - **Repository:** `Bhagyaashreee/GitPulse`
+   - **Branch:** `main`
+   - **Main file path:** `src/dashboard.py`
+5. **Deploy:**
+   Click **"Deploy!"**. Streamlit Cloud builds the container, installs dependencies from `requirements.txt`, and launches your dashboard.
+6. **First-Launch Initialization & Data Collection:**
+   - Because `data/gitpulse.db` is deliberately omitted from Git to preserve data hygiene, the cloud dashboard automatically initializes the clean SQLite schema on startup without crashing.
+   - When the welcome screen appears, click **"🚀 Fetch Sample Repositories Now"** (or use the sidebar **📥 Ingest Repositories** section) to ingest live GitHub repository metadata directly in the cloud container.
+   - No paid tokens or database credentials required!
+
+---
+
 ## 🧪 Running the Test Suite
 
-The project includes 29 unit and integration tests. All database and transform tests execute against temporary isolated databases (`tmp_path`) to ensure your local `data/gitpulse.db` is never modified during test runs:
+The project includes 32 unit and integration tests. All database, ingestion, and transform tests execute against temporary isolated databases (`tmp_path`) to ensure your local `data/gitpulse.db` is never modified during test runs:
 
 ```powershell
 python -m pytest -v
@@ -214,39 +257,42 @@ python -m pytest -v
 platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
 rootdir: C:\Users\shree\OneDrive\Desktop\GitPulse
 plugins: anyio-4.15.1
-collected 29 items
+collected 32 items
 
 tests/test_dashboard.py::test_load_analytics_data_nonexistent_db PASSED  [  3%]
 tests/test_dashboard.py::test_load_analytics_data_populated_db PASSED    [  6%]
-tests/test_dashboard.py::test_refresh_pipeline_execution PASSED          [ 10%]
-tests/test_database.py::test_db_initialization PASSED                    [ 13%]
-tests/test_database.py::test_insert_and_get_repository PASSED            [ 17%]
-tests/test_database.py::test_upsert_updates_existing_record_and_prevents_duplicates PASSED [ 20%]
-tests/test_database.py::test_insert_snapshot_history PASSED              [ 24%]
-tests/test_database.py::test_foreign_key_constraint PASSED               [ 27%]
-tests/test_database.py::test_foreign_key_cascade_delete PASSED           [ 31%]
-tests/test_database.py::test_pipeline_run_success PASSED                 [ 34%]
-tests/test_database.py::test_pipeline_run_with_errors PASSED             [ 37%]
-tests/test_database.py::test_ingest_with_database_integration PASSED     [ 41%]
-tests/test_database.py::test_ingest_error_does_not_create_snapshot PASSED [ 44%]
-tests/test_ingest.py::test_extract_metrics_complete_payload PASSED       [ 48%]
-tests/test_ingest.py::test_extract_metrics_missing_or_null_fields PASSED [ 51%]
-tests/test_ingest.py::test_save_raw_response PASSED                      [ 55%]
-tests/test_ingest.py::test_rate_limit_exceeded PASSED                    [ 58%]
-tests/test_ingest.py::test_repository_not_found PASSED                   [ 62%]
-tests/test_ingest.py::test_network_timeout PASSED                        [ 65%]
-tests/test_ingest.py::test_rate_limit_checker PASSED                     [ 68%]
-tests/test_transform.py::test_empty_database_handling PASSED             [ 72%]
-tests/test_transform.py::test_rankings_by_stars_and_forks PASSED         [ 75%]
-tests/test_transform.py::test_language_summary_and_aggregation PASSED    [ 79%]
-tests/test_transform.py::test_data_quality_missing_and_invalid_values PASSED [ 82%]
-tests/test_transform.py::test_historical_changes_multi_snapshot PASSED   [ 86%]
-tests/test_transform.py::test_historical_changes_single_snapshot PASSED  [ 89%]
+tests/test_dashboard.py::test_refresh_pipeline_execution PASSED          [  9%]
+tests/test_dashboard.py::test_ensure_database_initialized PASSED         [ 12%]
+tests/test_dashboard.py::test_trigger_ingestion_mocked PASSED            [ 15%]
+tests/test_dashboard.py::test_trigger_ingestion_rate_limited PASSED      [ 18%]
+tests/test_database.py::test_db_initialization PASSED                    [ 21%]
+tests/test_database.py::test_insert_and_get_repository PASSED            [ 25%]
+tests/test_database.py::test_upsert_updates_existing_record_and_prevents_duplicates PASSED [ 28%]
+tests/test_database.py::test_insert_snapshot_history PASSED              [ 31%]
+tests/test_database.py::test_foreign_key_constraint PASSED               [ 34%]
+tests/test_database.py::test_foreign_key_cascade_delete PASSED           [ 37%]
+tests/test_database.py::test_pipeline_run_success PASSED                 [ 40%]
+tests/test_database.py::test_pipeline_run_with_errors PASSED             [ 43%]
+tests/test_database.py::test_ingest_with_database_integration PASSED     [ 46%]
+tests/test_database.py::test_ingest_error_does_not_create_snapshot PASSED [ 50%]
+tests/test_ingest.py::test_extract_metrics_complete_payload PASSED       [ 53%]
+tests/test_ingest.py::test_extract_metrics_missing_or_null_fields PASSED [ 56%]
+tests/test_ingest.py::test_save_raw_response PASSED                      [ 59%]
+tests/test_ingest.py::test_rate_limit_exceeded PASSED                    [ 62%]
+tests/test_ingest.py::test_repository_not_found PASSED                   [ 65%]
+tests/test_ingest.py::test_network_timeout PASSED                        [ 68%]
+tests/test_ingest.py::test_rate_limit_checker PASSED                     [ 71%]
+tests/test_transform.py::test_empty_database_handling PASSED             [ 75%]
+tests/test_transform.py::test_rankings_by_stars_and_forks PASSED         [ 78%]
+tests/test_transform.py::test_language_summary_and_aggregation PASSED    [ 81%]
+tests/test_transform.py::test_data_quality_missing_and_invalid_values PASSED [ 84%]
+tests/test_transform.py::test_historical_changes_multi_snapshot PASSED   [ 87%]
+tests/test_transform.py::test_historical_changes_single_snapshot PASSED  [ 90%]
 tests/test_transform.py::test_historical_changes_zero_snapshots PASSED   [ 93%]
 tests/test_transform.py::test_repository_activity_ratios PASSED          [ 96%]
 tests/test_transform.py::test_export_all_csv_files PASSED                [100%]
 
-============================= 29 passed in 3.66s ==============================
+============================= 32 passed in 4.05s ==============================
 ```
 
 ---
@@ -285,9 +331,9 @@ In accordance with data engineering best practices:
 
 ## ⚠️ Known Limitations
 
-1. **Unauthenticated Rate Limits:** The GitHub REST API allows **60 requests per hour per IP address** for unauthenticated clients. If rate limits are exceeded, `src/ingest.py` raises `GitHubRateLimitError` and displays the exact UTC reset timestamp.
+1. **Unauthenticated Rate Limits:** The GitHub REST API allows **60 requests per hour per IP address** for unauthenticated clients. If rate limits are exceeded, `src/ingest.py` raises `GitHubRateLimitError` and displays the exact UTC reset timestamp. Because cloud deployment platforms (such as Streamlit Cloud) share outbound IP addresses across shared containers, the rate limit can occasionally be consumed faster; the app safely detects this and informs users without crashing.
 2. **Historical Time-Series Dynamics:** Metric snapshots capture data at the moment of collection. Because real-world repository metrics evolve over days and weeks, repeated ingestion runs are necessary to observe significant star and fork velocity trends. Repositories with only one snapshot are explicitly marked as `INSUFFICIENT_DATA`.
-3. **Local Scope:** GitPulse is intentionally designed as a local-first desktop analytics tool; it does not include cloud deployment, distributed scheduling, or background worker daemons.
+3. **Cloud Ephemeral Storage:** On free cloud tiers like Streamlit Community Cloud, container storage is ephemeral. When a container restarts or goes to sleep after prolonged inactivity, the newly created database reinitializes cleanly with empty tables. Users can repopulate it anytime by clicking **"🚀 Fetch Sample Repositories Now"** or using the sidebar ingestion tool. Local Windows execution retains `data/gitpulse.db` indefinitely.
 
 ---
 

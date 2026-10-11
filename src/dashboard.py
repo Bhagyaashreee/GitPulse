@@ -29,9 +29,27 @@ import streamlit as st
 try:
     from src.database import DEFAULT_DB_PATH, DatabaseManager
     from src.transform import DEFAULT_PROCESSED_DIR, GitPulseTransformer
+    from src.ingest import (
+        DEFAULT_USER_AGENT,
+        GitHubAPIError,
+        GitHubIngester,
+        GitHubNetworkError,
+        GitHubRateLimitError,
+        GitHubRepoNotFoundError,
+        GitPulseError,
+    )
 except ModuleNotFoundError:
     from database import DEFAULT_DB_PATH, DatabaseManager
     from transform import DEFAULT_PROCESSED_DIR, GitPulseTransformer
+    from ingest import (
+        DEFAULT_USER_AGENT,
+        GitHubAPIError,
+        GitHubIngester,
+        GitHubNetworkError,
+        GitHubRateLimitError,
+        GitHubRepoNotFoundError,
+        GitPulseError,
+    )
 
 # -----------------------------------------------------------------------------
 # Configuration & Theme Settings
@@ -208,24 +226,18 @@ PLOTLY_LAYOUT_DEFAULTS = dict(
 # -----------------------------------------------------------------------------
 # Data Ingestion & Transformation Bridge
 # -----------------------------------------------------------------------------
+def ensure_database_initialized(db_path_str: str = str(DEFAULT_DB_PATH)) -> DatabaseManager:
+    """Ensure the SQLite database file and required schema tables exist safely."""
+    db_path = Path(db_path_str)
+    return DatabaseManager(db_path=db_path)
+
+
 @st.cache_data(show_spinner=False)
 def load_analytics_data(
     db_path_str: str = str(DEFAULT_DB_PATH),
 ) -> Dict[str, pd.DataFrame]:
     """Load transformed analytics datasets from the SQLite database."""
-    db_path = Path(db_path_str)
-    if not db_path.exists():
-        return {
-            "top_repos": pd.DataFrame(),
-            "languages": pd.DataFrame(),
-            "activity": pd.DataFrame(),
-            "history": pd.DataFrame(),
-            "raw_repos": pd.DataFrame(),
-            "raw_snaps": pd.DataFrame(),
-            "pipeline_runs": pd.DataFrame(),
-        }
-
-    db_manager = DatabaseManager(db_path=db_path)
+    db_manager = ensure_database_initialized(db_path_str)
     transformer = GitPulseTransformer(db_manager=db_manager)
 
     top_repos = transformer.compute_top_repositories()
@@ -252,10 +264,52 @@ def refresh_pipeline(db_path_str: str = str(DEFAULT_DB_PATH)) -> None:
     """Trigger full transformation recalculation and export CSVs."""
     db_path = Path(db_path_str)
     if not db_path.exists():
-        return
+        ensure_database_initialized(db_path_str)
     transformer = GitPulseTransformer(db_path=db_path)
     transformer.export_all()
     st.cache_data.clear()
+
+
+def trigger_ingestion(
+    repos: list[str],
+    db_path_str: str = str(DEFAULT_DB_PATH),
+) -> tuple[bool, str]:
+    """Trigger intentional ingestion of public repositories into SQLite database.
+
+    Returns:
+        Tuple of (success_boolean, status_message)
+    """
+    db_manager = ensure_database_initialized(db_path_str)
+    ingester = GitHubIngester(db_manager=db_manager)
+
+    try:
+        # Check rate limit before issuing repository requests
+        rate = ingester.check_rate_limit()
+        remaining = rate.get("remaining")
+        if remaining == 0:
+            reset_utc = rate.get("reset_time_utc", "the next reset window")
+            return (
+                False,
+                f"GitHub unauthenticated rate limit reached (0 remaining). Resets at {reset_utc} UTC.",
+            )
+
+        results = ingester.ingest_multiple(repos, save_raw=True)
+        if not results:
+            return (
+                False,
+                "No repositories were ingested. Please verify the repository names (format: owner/repo).",
+            )
+
+        # Recalculate analytics and export CSVs
+        refresh_pipeline(db_path_str)
+        return True, f"Successfully ingested {len(results)} of {len(repos)} repositories!"
+
+    except GitHubRateLimitError as exc:
+        return False, f"Rate limit error: {exc}"
+    except (GitHubNetworkError, GitPulseError) as exc:
+        return False, f"Ingestion error: {exc}"
+    except Exception as exc:
+        return False, f"Unexpected error during ingestion: {exc}"
 
 
 # -----------------------------------------------------------------------------
@@ -773,6 +827,29 @@ def main():
             st.success("Analytics refreshed and exported to data/processed/")
 
         st.markdown("---")
+        st.markdown("**📥 Ingest Repositories**")
+        st.caption("Collect public GitHub repository metadata without an API key:")
+        default_ingest_repos = "pallets/flask, psf/requests, fastapi/fastapi"
+        repos_to_ingest = st.text_input(
+            "Repositories (comma-separated)",
+            value=default_ingest_repos,
+            help="Enter public repositories in owner/repo format",
+            key="sidebar_ingest_input",
+        )
+        if st.button("Fetch & Ingest Data", width="stretch", help="Collects metadata intentionally without requiring an API key"):
+            repo_list = [r.strip() for r in repos_to_ingest.split(",") if r.strip()]
+            if repo_list:
+                with st.spinner("Fetching public repository metadata from GitHub API..."):
+                    success, msg = trigger_ingestion(repo_list, db_path_input)
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.warning(msg)
+            else:
+                st.error("Please enter at least one repository in owner/repo format.")
+
+        st.markdown("---")
         st.markdown("**📁 Database Diagnostics**")
         db_file = Path(db_path_input)
         if db_file.exists():
@@ -780,7 +857,7 @@ def main():
             mod_time = datetime.fromtimestamp(db_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             st.caption(f"Status: **Connected**\n\nSize: **{size_kb:.1f} KB**\n\nModified: **{mod_time}**")
         else:
-            st.error(f"Database not found at `{db_path_input}`.")
+            st.caption(f"Status: **Initialized (Empty)**\n\nLocation: `{db_path_input}`")
 
         st.markdown("---")
         st.caption("GitPulse ELT Pipeline v1.0\n\nFree & Local-First")
@@ -799,14 +876,41 @@ def main():
             """,
             unsafe_allow_html=True,
         )
-        st.warning(
-            f"⚠️ **No data found in SQLite database (`{db_path_input}`).**\n\n"
-            "To populate the database with public GitHub repositories, run the ingestion command in PowerShell:\n\n"
-            "```powershell\n"
-            "python -m src.ingest --repos pallets/flask psf/requests fastapi/fastapi\n"
-            "```\n\n"
-            "Then click **Refresh Analytics** in the sidebar."
+        st.info(
+            "👋 **Welcome to GitPulse!** No repository data is currently in the SQLite database.\n\n"
+            "Because runtime data and local databases are excluded from Git for clean deployment, "
+            "the database starts unpopulated. You can trigger collection right away without an API key!"
         )
+
+        st.markdown("### How to Collect Data")
+        tab_cloud, tab_cli = st.tabs(["🌐 In-App Ingestion (One-Click)", "💻 PowerShell CLI (Local)"])
+
+        with tab_cloud:
+            st.markdown(
+                "Click below to fetch sample public repositories (`pallets/flask`, `psf/requests`, `fastapi/fastapi`) "
+                "using GitHub's unauthenticated REST API. No credentials or setup required."
+            )
+            if st.button("🚀 Fetch Sample Repositories Now", type="primary", key="empty_state_ingest_btn"):
+                with st.spinner("Connecting to GitHub API and populating database..."):
+                    success, msg = trigger_ingestion(
+                        ["pallets/flask", "psf/requests", "fastapi/fastapi"],
+                        db_path_input,
+                    )
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.warning(msg)
+
+        with tab_cli:
+            st.markdown(
+                "If running locally on Windows, you can populate the database from PowerShell:\n\n"
+                "```powershell\n"
+                "python -m src.ingest --repos pallets/flask psf/requests fastapi/fastapi\n"
+                "python -m src.transform\n"
+                "```\n\n"
+                "Then click **Refresh Analytics** in the sidebar."
+            )
         return
 
     # Render Dashboard Sections
