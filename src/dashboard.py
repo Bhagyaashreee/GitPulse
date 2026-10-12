@@ -244,6 +244,7 @@ def load_analytics_data(
     languages = transformer.compute_language_summary()
     activity = transformer.compute_repository_activity()
     history = transformer.compute_historical_changes()
+    health = transformer.compute_repository_health_scores()
     raw_repos = transformer.load_raw_repositories()
     raw_snaps = transformer.load_raw_snapshots()
     runs_list = db_manager.get_pipeline_runs()
@@ -254,6 +255,7 @@ def load_analytics_data(
         "languages": languages,
         "activity": activity,
         "history": history,
+        "health": health,
         "raw_repos": raw_repos,
         "raw_snaps": raw_snaps,
         "pipeline_runs": pipeline_runs,
@@ -623,20 +625,121 @@ def render_language_analytics(data: Dict[str, pd.DataFrame]) -> None:
 
 
 def render_repository_activity(data: Dict[str, pd.DataFrame]) -> None:
-    """Render repository age, update latency, and issue health ratios."""
-    activity = data["activity"]
+    """Render repository health scores, component breakdown, age, and update latency."""
+    activity = data.get("activity", pd.DataFrame())
+    health = data.get("health", pd.DataFrame())
     if activity.empty:
         return
 
     st.markdown(
         """
         <div class="section-card">
-            <div class="section-title">⏱️ Repository Activity & Health Metrics</div>
+            <div class="section-title">⏱️ Repository Activity & Health Scoring</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # 1. Health Scoring Scoreboard & Inspector (if health data present)
+    if not health.empty:
+        st.markdown("**🛡️ Repository Health Scoreboard**")
+        st.caption(
+            "Composite index (0–100) based on transparent heuristic rules: maintenance recency, "
+            "open backlog pressure (issues & PRs combined), community adoption, metadata hygiene, "
+            "and observed snapshot velocity. Normalized across available weights without penalizing missing data."
+        )
+
+        # Overview Table
+        scoreboard_df = health[
+            ["full_name", "health_score", "health_grade", "data_coverage_pct", "notes"]
+        ].copy()
+        scoreboard_df["Health Score"] = scoreboard_df["health_score"].apply(
+            lambda v: f"{int(v)}/100" if pd.notna(v) else "N/A"
+        )
+        scoreboard_df["Grade"] = scoreboard_df["health_grade"]
+        scoreboard_df["Data Coverage"] = scoreboard_df["data_coverage_pct"].apply(lambda v: f"{int(v)}%")
+        scoreboard_df["Assessment"] = scoreboard_df["notes"]
+
+        st.dataframe(
+            scoreboard_df[
+                ["full_name", "Health Score", "Grade", "Data Coverage", "Assessment"]
+            ].rename(columns={"full_name": "Repository"}),
+            width="stretch",
+            hide_index=True,
+        )
+
+        # Interactive Component Breakdown Inspector
+        repo_names = health["full_name"].tolist()
+        selected_health_repo = st.selectbox(
+            "Select Repository for Detailed Health Breakdown",
+            options=repo_names,
+            key="health_repo_select",
+        )
+
+        selected_matches = health[health["full_name"] == selected_health_repo]
+        if not selected_matches.empty:
+            repo_health = selected_matches.iloc[0]
+
+            # Top Metric Cards for Selected Repo
+            h_score_str = f"{int(repo_health['health_score'])}/100" if pd.notna(repo_health['health_score']) else "N/A"
+            h_grade = str(repo_health['health_grade'])
+            cov_str = f"{int(repo_health['data_coverage_pct'])}%"
+            pts_str = f"{repo_health['points_earned']} / {repo_health['evaluated_weight']} pts"
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Health Score", h_score_str)
+            with k2:
+                st.metric("Health Grade", f"Grade {h_grade}")
+            with k3:
+                st.metric("Data Coverage", cov_str)
+            with k4:
+                st.metric("Points Earned", pts_str)
+
+            # Component Breakdown in an Expander
+            with st.expander("🔍 Explainable Heuristic Component Breakdown", expanded=True):
+                breakdown_rows = [
+                    {
+                        "Pillar": "1. Maintenance Recency",
+                        "Score / Max": f"{int(repo_health['recency_score']) if pd.notna(repo_health['recency_score']) else 'N/A'} / {repo_health['recency_max']} pts",
+                        "Status": repo_health["recency_status"],
+                        "Observed Signal & Explanation": repo_health["recency_detail"],
+                    },
+                    {
+                        "Pillar": "2. Backlog Pressure (Issues & PRs)*",
+                        "Score / Max": f"{int(repo_health['backlog_score'])} / {repo_health['backlog_max']} pts",
+                        "Status": repo_health["backlog_status"],
+                        "Observed Signal & Explanation": repo_health["backlog_detail"],
+                    },
+                    {
+                        "Pillar": "3. Community Adoption",
+                        "Score / Max": f"{int(repo_health['community_score'])} / {repo_health['community_max']} pts",
+                        "Status": repo_health["community_status"],
+                        "Observed Signal & Explanation": repo_health["community_detail"],
+                    },
+                    {
+                        "Pillar": "4. Project Hygiene",
+                        "Score / Max": f"{int(repo_health['hygiene_score'])} / {repo_health['hygiene_max']} pts",
+                        "Status": repo_health["hygiene_status"],
+                        "Observed Signal & Explanation": repo_health["hygiene_detail"],
+                    },
+                    {
+                        "Pillar": "5. Observed Snapshot Trends**",
+                        "Score / Max": f"{int(repo_health['trend_score']) if pd.notna(repo_health['trend_score']) else 'N/A'} / {repo_health['trend_max']} pts",
+                        "Status": repo_health["trend_status"],
+                        "Observed Signal & Explanation": repo_health["trend_detail"],
+                    },
+                ]
+                st.dataframe(pd.DataFrame(breakdown_rows), width="stretch", hide_index=True)
+                st.caption(
+                    "📌 *Semantics Notice: GitHub's open_issues_count includes both open issues and pull requests combined. "
+                    "**Snapshot Trends measure observed changes between local collection events, not full lifetime history. "
+                    "Missing metadata or single-snapshot history is excluded from the denominator rather than penalizing the score."
+                )
+
+        st.markdown("---")
+
+    # 2. Existing Scatter Plot & Latency Charts
     col1, col2 = st.columns([1, 1])
 
     with col1:
@@ -662,7 +765,6 @@ def render_repository_activity(data: Dict[str, pd.DataFrame]) -> None:
 
     with col2:
         st.markdown("**Repository Age vs. Days Since Last GitHub Update**")
-        # Horizontal comparison of update latency
         act_sorted = activity.sort_values(by="days_since_update", ascending=True)
         fig_lat = px.bar(
             act_sorted,

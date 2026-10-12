@@ -5,7 +5,12 @@ import pytest
 import pandas as pd
 
 from src.database import DatabaseManager
-from src.dashboard import load_analytics_data, refresh_pipeline, render_historical_trends
+from src.dashboard import (
+    load_analytics_data,
+    refresh_pipeline,
+    render_historical_trends,
+    render_repository_activity,
+)
 
 
 @pytest.fixture
@@ -279,7 +284,41 @@ def test_render_historical_trends_single_and_zero_snapshot_fallbacks(tmp_path):
         "top_repos": pd.DataFrame(),
         "raw_snaps": pd.DataFrame(),
         "history": pd.DataFrame(),
+        "health": pd.DataFrame(),
     }
     with patch("src.dashboard.st") as mock_st:
         render_historical_trends(empty_data)
         assert mock_st.info.called
+
+
+def test_dashboard_health_data_loading(test_dashboard_db):
+    """Test that load_analytics_data includes health scores and correct columns."""
+    data = load_analytics_data(str(test_dashboard_db))
+
+    assert "health" in data
+    health_df = data["health"]
+    assert not health_df.empty
+    assert "health_score" in health_df.columns
+    assert "health_grade" in health_df.columns
+    assert "data_coverage_pct" in health_df.columns
+    assert "recency_detail" in health_df.columns
+
+
+def test_render_repository_activity_with_health_scoring(test_dashboard_db):
+    """Test render_repository_activity renders health scoreboard, metrics, and expander without errors."""
+    from unittest.mock import MagicMock, patch
+
+    data = load_analytics_data(str(test_dashboard_db))
+
+    with patch("src.dashboard.st") as mock_st:
+        mock_st.selectbox.return_value = data["health"].iloc[0]["full_name"]
+        mock_st.columns.side_effect = lambda spec: [MagicMock() for _ in range(len(spec) if isinstance(spec, list) else int(spec))]
+        mock_expander = MagicMock()
+        mock_st.expander.return_value.__enter__.return_value = mock_expander
+
+        render_repository_activity(data)
+
+        # Verify dataframe scoreboard, metrics, and charts were rendered
+        assert mock_st.dataframe.called
+        assert mock_st.metric.called
+        assert mock_st.plotly_chart.called

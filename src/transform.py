@@ -516,6 +516,273 @@ class GitPulseTransformer:
 
         return pd.DataFrame(records, columns=cols)
 
+    def compute_repository_health_scores(self) -> pd.DataFrame:
+        """Calculate explainable heuristic repository health scores (0-100) using observable signals.
+
+        Evaluates five transparent heuristic pillars:
+        1. Maintenance Recency (Max 35 pts): Days since last update. Excluded if update date missing.
+        2. Backlog Pressure (Max 25 pts): Open issues & PRs relative to community stars.
+           Note: GitHub's open_issues_count includes both open issues and pull requests combined.
+        3. Community Adoption (Max 20 pts): Forks relative to stars.
+        4. Project Hygiene (Max 10 pts): Presence of description and primary language.
+        5. Observed Snapshot Trends (Max 10 pts): Star growth and issue burn-down across collection cycles.
+           Only evaluated when >= 2 snapshots exist. Excluded from denominator if < 2 snapshots.
+
+        Uses dynamic available-weight normalization:
+            health_score = round((points_earned / available_weight) * 100)
+            data_coverage_pct = round(available_weight)
+        If available_weight < 40, health_score is None and grade is 'N/A' (Insufficient Signals).
+
+        Returns:
+            DataFrame with component-level scores, statuses, explanations, total health score, and grade.
+        """
+        raw_repos_df = self.load_raw_repositories()
+        act_df = self.compute_repository_activity()
+        hist_df = self.compute_historical_changes()
+
+        cols = [
+            "repo_id",
+            "full_name",
+            "health_score",
+            "health_grade",
+            "data_coverage_pct",
+            "evaluated_weight",
+            "points_earned",
+            "recency_score",
+            "recency_max",
+            "recency_status",
+            "recency_detail",
+            "backlog_score",
+            "backlog_max",
+            "backlog_status",
+            "backlog_detail",
+            "community_score",
+            "community_max",
+            "community_status",
+            "community_detail",
+            "hygiene_score",
+            "hygiene_max",
+            "hygiene_status",
+            "hygiene_detail",
+            "trend_score",
+            "trend_max",
+            "trend_status",
+            "trend_detail",
+            "notes",
+        ]
+
+        if raw_repos_df.empty:
+            return pd.DataFrame(columns=cols)
+
+        # Build lookup maps for activity and history metrics
+        act_map = {row["repo_id"]: row for _, row in act_df.iterrows()} if not act_df.empty else {}
+        hist_map = {row["repo_id"]: row for _, row in hist_df.iterrows()} if not hist_df.empty else {}
+
+        records: List[Dict[str, Any]] = []
+
+        for _, repo in raw_repos_df.iterrows():
+            r_id = int(repo["repo_id"])
+            full_name = str(repo["full_name"])
+            stars = int(repo["stars"])
+            forks = int(repo["forks"])
+            open_issues = int(repo["open_issues"])
+            desc = str(repo.get("description") or "").strip()
+            lang = str(repo.get("primary_language") or "").strip()
+
+            act_row = act_map.get(r_id, {})
+            days_since_update = float(act_row.get("days_since_update", -1.0))
+
+            hist_row = hist_map.get(r_id, {})
+            snap_count = int(hist_row.get("snapshot_count", 0))
+            hist_status = str(hist_row.get("status", "NO_SNAPSHOTS"))
+            delta_stars = hist_row.get("delta_stars")
+            delta_issues = hist_row.get("delta_open_issues")
+
+            earned_pts = 0.0
+            avail_weight = 0.0
+
+            # 1. Maintenance Recency (Max 35)
+            if days_since_update < 0.0:
+                rec_score = None
+                rec_max = 0.0
+                rec_status = "DATA_UNAVAILABLE"
+                rec_detail = "Last update timestamp missing from repository metadata"
+            else:
+                rec_max = 35.0
+                avail_weight += 35.0
+                rec_status = "AVAILABLE"
+                if days_since_update <= 14.0:
+                    rec_score = 35.0
+                    rec_detail = f"Updated {days_since_update:.1f} days ago (very active)"
+                elif days_since_update <= 45.0:
+                    rec_score = 30.0
+                    rec_detail = f"Updated {days_since_update:.1f} days ago (active maintenance)"
+                elif days_since_update <= 90.0:
+                    rec_score = 22.0
+                    rec_detail = f"Updated {days_since_update:.1f} days ago (regular maintenance)"
+                elif days_since_update <= 180.0:
+                    rec_score = 15.0
+                    rec_detail = f"Updated {days_since_update:.1f} days ago (moderate activity)"
+                elif days_since_update <= 365.0:
+                    rec_score = 8.0
+                    rec_detail = f"Updated {days_since_update:.1f} days ago (slow maintenance)"
+                else:
+                    rec_score = 0.0
+                    rec_detail = f"Updated {days_since_update:.1f} days ago (stale / inactive > 1 year)"
+                earned_pts += rec_score
+
+            # 2. Backlog Pressure (Issues & PRs) (Max 25)
+            bkg_max = 25.0
+            avail_weight += 25.0
+            bkg_status = "AVAILABLE"
+            if stars == 0:
+                if open_issues == 0:
+                    bkg_score = 25.0
+                    bkg_detail = "0 stars and 0 open issues/PRs (clean backlog)"
+                elif open_issues <= 5:
+                    bkg_score = 18.0
+                    bkg_detail = f"0 stars and {open_issues} open issues/PRs (minimal backlog)"
+                else:
+                    bkg_score = 10.0
+                    bkg_detail = f"0 stars and {open_issues} open issues/PRs (elevated backlog for new project)"
+            else:
+                ratio = (open_issues / stars) * 100.0
+                if ratio <= 2.0:
+                    bkg_score = 25.0
+                    bkg_detail = f"{open_issues:,} open issues/PRs ({ratio:.1f}% of stars - responsive triage)"
+                elif ratio <= 5.0:
+                    bkg_score = 20.0
+                    bkg_detail = f"{open_issues:,} open issues/PRs ({ratio:.1f}% of stars - manageable backlog)"
+                elif ratio <= 10.0:
+                    bkg_score = 15.0
+                    bkg_detail = f"{open_issues:,} open issues/PRs ({ratio:.1f}% of stars - moderate backlog)"
+                elif ratio <= 20.0:
+                    bkg_score = 8.0
+                    bkg_detail = f"{open_issues:,} open issues/PRs ({ratio:.1f}% of stars - heavy backlog)"
+                else:
+                    bkg_score = 3.0
+                    bkg_detail = f"{open_issues:,} open issues/PRs ({ratio:.1f}% of stars - critical backlog debt)"
+            earned_pts += bkg_score
+
+            # 3. Community Adoption (Forks/Stars) (Max 20)
+            com_max = 20.0
+            avail_weight += 20.0
+            com_status = "AVAILABLE"
+            if stars == 0:
+                if forks == 0:
+                    com_score = 10.0
+                    com_detail = "0 stars and 0 forks (early-stage baseline)"
+                else:
+                    com_score = 15.0
+                    com_detail = f"{forks} forks with 0 stars (early community contributions)"
+            else:
+                f_ratio = (forks / stars) * 100.0
+                if f_ratio >= 10.0:
+                    com_score = 20.0
+                    com_detail = f"{forks:,} forks ({f_ratio:.1f}% fork/star ratio - high community adoption)"
+                elif f_ratio >= 5.0:
+                    com_score = 16.0
+                    com_detail = f"{forks:,} forks ({f_ratio:.1f}% fork/star ratio - healthy adoption)"
+                elif f_ratio >= 2.0:
+                    com_score = 12.0
+                    com_detail = f"{forks:,} forks ({f_ratio:.1f}% fork/star ratio - moderate adoption)"
+                else:
+                    com_score = 8.0
+                    com_detail = f"{forks:,} forks ({f_ratio:.1f}% fork/star ratio - low fork engagement)"
+            earned_pts += com_score
+
+            # 4. Project Hygiene (Max 10)
+            hyg_max = 10.0
+            avail_weight += 10.0
+            hyg_status = "AVAILABLE"
+            desc_pts = 5.0 if bool(desc) else 0.0
+            lang_pts = 5.0 if lang and lang not in ("Unknown", "None", "") else 0.0
+            hyg_score = desc_pts + lang_pts
+            hyg_parts = []
+            hyg_parts.append("description present" if desc_pts > 0 else "missing description")
+            hyg_parts.append(f"language '{lang}'" if lang_pts > 0 else "unspecified language")
+            hyg_detail = ", ".join(hyg_parts) + f" ({int(hyg_score)}/10 pts)"
+            earned_pts += hyg_score
+
+            # 5. Observed Snapshot Trends (Max 10)
+            if snap_count < 2 or hist_status != "CALCULATED" or delta_stars is None or delta_issues is None:
+                tr_score = None
+                tr_max = 0.0
+                tr_status = "INSUFFICIENT_DATA"
+                tr_detail = f"Requires ≥ 2 collection cycles to observe trends (recorded: {snap_count})"
+            else:
+                tr_max = 10.0
+                avail_weight += 10.0
+                tr_status = "AVAILABLE"
+                d_s = int(delta_stars)
+                d_i = int(delta_issues)
+                s_pts = 5.0 if d_s > 0 else (3.0 if d_s == 0 else 1.0)
+                i_pts = 5.0 if d_i < 0 else (4.0 if d_i == 0 else 2.0)
+                tr_score = s_pts + i_pts
+                s_lbl = f"+{d_s} stars" if d_s > 0 else (f"{d_s} stars" if d_s < 0 else "stable stars")
+                i_lbl = f"{d_i} issues/PRs (burn-down)" if d_i < 0 else (f"+{d_i} issues/PRs" if d_i > 0 else "stable issues")
+                tr_detail = f"Observed over {snap_count} collections: {s_lbl}, {i_lbl} ({int(tr_score)}/10 pts)"
+                earned_pts += tr_score
+
+            # Final Normalization & Grade Calculation
+            coverage_pct = round(avail_weight)
+            if avail_weight >= 40.0:
+                final_score = int(round((earned_pts / avail_weight) * 100.0))
+                final_score = max(0, min(100, final_score))
+                if final_score >= 90:
+                    final_grade = "A"
+                elif final_score >= 75:
+                    final_grade = "B"
+                elif final_score >= 60:
+                    final_grade = "C"
+                elif final_score >= 40:
+                    final_grade = "D"
+                else:
+                    final_grade = "F"
+                note_str = f"Grade {final_grade} ({final_score}/100) based on {coverage_pct}% data coverage."
+            else:
+                final_score = None
+                final_grade = "N/A"
+                note_str = f"Insufficient signals available ({coverage_pct}% coverage < 40% threshold)."
+
+            records.append(
+                {
+                    "repo_id": r_id,
+                    "full_name": full_name,
+                    "health_score": final_score,
+                    "health_grade": final_grade,
+                    "data_coverage_pct": coverage_pct,
+                    "evaluated_weight": int(avail_weight),
+                    "points_earned": round(earned_pts, 1),
+                    "recency_score": rec_score,
+                    "recency_max": int(rec_max),
+                    "recency_status": rec_status,
+                    "recency_detail": rec_detail,
+                    "backlog_score": bkg_score,
+                    "backlog_max": int(bkg_max),
+                    "backlog_status": bkg_status,
+                    "backlog_detail": bkg_detail,
+                    "community_score": com_score,
+                    "community_max": int(com_max),
+                    "community_status": com_status,
+                    "community_detail": com_detail,
+                    "hygiene_score": hyg_score,
+                    "hygiene_max": int(hyg_max),
+                    "hygiene_status": hyg_status,
+                    "hygiene_detail": hyg_detail,
+                    "trend_score": tr_score,
+                    "trend_max": int(tr_max),
+                    "trend_status": tr_status,
+                    "trend_detail": tr_detail,
+                    "notes": note_str,
+                }
+            )
+
+        res_df = pd.DataFrame(records, columns=cols)
+        return res_df.sort_values(
+            by=["health_score", "repo_id"], ascending=[False, True], na_position="last"
+        ).reset_index(drop=True)
+
     def export_all(self) -> Dict[str, Path]:
         """Compute all analytical views and export them to CSV files in data/processed/.
 
@@ -528,18 +795,21 @@ class GitPulseTransformer:
         lang_df = self.compute_language_summary()
         activity_df = self.compute_repository_activity()
         history_df = self.compute_historical_changes()
+        health_df = self.compute_repository_health_scores()
 
         export_paths: Dict[str, Path] = {
             "top_repositories": self.output_dir / "top_repositories.csv",
             "language_summary": self.output_dir / "language_summary.csv",
             "repository_activity": self.output_dir / "repository_activity.csv",
             "historical_changes": self.output_dir / "historical_changes.csv",
+            "repository_health": self.output_dir / "repository_health.csv",
         }
 
         top_repos_df.to_csv(export_paths["top_repositories"], index=False, encoding="utf-8")
         lang_df.to_csv(export_paths["language_summary"], index=False, encoding="utf-8")
         activity_df.to_csv(export_paths["repository_activity"], index=False, encoding="utf-8")
         history_df.to_csv(export_paths["historical_changes"], index=False, encoding="utf-8")
+        health_df.to_csv(export_paths["repository_health"], index=False, encoding="utf-8")
 
         for key, path in export_paths.items():
             logger.info("Exported %s to %s", key, path)

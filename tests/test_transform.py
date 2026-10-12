@@ -132,9 +132,9 @@ def test_empty_database_handling(test_db_manager, tmp_path):
     assert history.empty
     assert "delta_stars" in history.columns
 
-    # Verify export doesn't fail on empty database
+    # Verify export doesn't fail on empty database (now 5 exports including repository_health)
     exported = transformer.export_all()
-    assert len(exported) == 4
+    assert len(exported) == 5
     for p in exported.values():
         assert p.exists()
 
@@ -375,3 +375,202 @@ def test_snapshot_history_single_and_zero_snapshot_fallbacks(populated_transform
     assert df_1.iloc[0]["delta_open_issues"] == 0
     assert df_1.iloc[0]["elapsed_seconds"] == 0.0
     assert df_1.iloc[0]["star_velocity_per_day"] == 0.0
+
+
+def test_health_score_active_healthy_repo(test_db_manager, tmp_path):
+    """Test health score for an active, well-triaged repository with complete data."""
+    test_db_manager.upsert_repository(
+        {
+            "repo_id": 301,
+            "owner": "healthy-org",
+            "name": "healthy-tool",
+            "description": "Production grade tool",
+            "primary_language": "Python",
+            "stars": 10000,
+            "forks": 1000,  # 10.0% fork ratio -> 20 pts
+            "open_issues": 100,  # 1.0% issue ratio -> 25 pts
+            "creation_date": "2020-01-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",  # very recent -> 35 pts
+            "url": "https://github.com/healthy-org/healthy-tool",
+        }
+    )
+    # Add 2 snapshots with positive stars and resolving issues
+    test_db_manager.insert_snapshot(
+        repo_id=301, stars=9500, forks=950, open_issues=110, collection_timestamp="2026-10-01T00:00:00Z"
+    )
+    test_db_manager.insert_snapshot(
+        repo_id=301, stars=10000, forks=1000, open_issues=100, collection_timestamp="2026-10-10T00:00:00Z"
+    )
+
+    transformer = GitPulseTransformer(db_manager=test_db_manager, output_dir=tmp_path / "proc")
+    health_df = transformer.compute_repository_health_scores()
+
+    assert len(health_df) == 1
+    row = health_df.iloc[0]
+    assert row["health_score"] == 100
+    assert row["health_grade"] == "A"
+    assert row["data_coverage_pct"] == 100
+    assert row["recency_score"] == 35.0
+    assert row["backlog_score"] == 25.0
+    assert row["community_score"] == 20.0
+    assert row["hygiene_score"] == 10.0
+    assert row["trend_score"] == 10.0
+
+
+def test_health_score_stale_critical_repo(test_db_manager, tmp_path):
+    """Test health score for an abandoned, stale repository with high issue backlog."""
+    test_db_manager.upsert_repository(
+        {
+            "repo_id": 302,
+            "owner": "stale-org",
+            "name": "stale-tool",
+            "description": "",  # missing description -> 0 pts
+            "primary_language": None,  # unspecified language -> 0 pts
+            "stars": 1000,
+            "forks": 5,  # 0.5% fork ratio -> 8 pts
+            "open_issues": 300,  # 30.0% issue ratio -> 3 pts
+            "creation_date": "2020-01-01T00:00:00Z",
+            "last_updated_date": "2024-01-01T00:00:00Z",  # > 1 year stale -> 0 pts
+            "url": "https://github.com/stale-org/stale-tool",
+        }
+    )
+
+    transformer = GitPulseTransformer(db_manager=test_db_manager, output_dir=tmp_path / "proc")
+    health_df = transformer.compute_repository_health_scores()
+
+    assert len(health_df) == 1
+    row = health_df.iloc[0]
+    # Points earned: 0 (recency) + 3 (backlog) + 8 (community) + 0 (hygiene) = 11 pts
+    # Denominator: 35 + 25 + 20 + 10 = 90 pts -> 11/90 * 100 = 12
+    assert row["health_score"] <= 39
+    assert row["health_grade"] == "F"
+    assert row["data_coverage_pct"] == 90
+    assert row["trend_status"] == "INSUFFICIENT_DATA"
+
+
+def test_health_score_zero_stars_no_division_by_zero(test_db_manager, tmp_path):
+    """Test deterministic evaluation for zero-star repositories without division by zero."""
+    # Zero stars with 0 issues
+    test_db_manager.upsert_repository(
+        {
+            "repo_id": 303,
+            "owner": "new-org",
+            "name": "brand-new",
+            "description": "New project",
+            "primary_language": "Python",
+            "stars": 0,
+            "forks": 0,
+            "open_issues": 0,
+            "creation_date": "2026-10-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",
+            "url": "https://github.com/new-org/brand-new",
+        }
+    )
+    # Zero stars with 8 issues
+    test_db_manager.upsert_repository(
+        {
+            "repo_id": 304,
+            "owner": "new-org",
+            "name": "issues-only",
+            "description": "Issues only project",
+            "primary_language": "Rust",
+            "stars": 0,
+            "forks": 2,
+            "open_issues": 8,
+            "creation_date": "2026-10-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",
+            "url": "https://github.com/new-org/issues-only",
+        }
+    )
+
+    transformer = GitPulseTransformer(db_manager=test_db_manager, output_dir=tmp_path / "proc")
+    health_df = transformer.compute_repository_health_scores()
+
+    assert len(health_df) == 2
+    row_303 = health_df[health_df["repo_id"] == 303].iloc[0]
+    assert row_303["backlog_score"] == 25.0
+    assert row_303["community_score"] == 10.0
+    assert pd.notna(row_303["health_score"])
+
+    row_304 = health_df[health_df["repo_id"] == 304].iloc[0]
+    assert row_304["backlog_score"] == 10.0
+    assert row_304["community_score"] == 15.0
+    assert pd.notna(row_304["health_score"])
+
+
+def test_health_score_missing_update_date_normalization(test_db_manager, tmp_path):
+    """Test dynamic weight normalization when last_updated_date is missing without penalizing score."""
+    test_db_manager.upsert_repository(
+        {
+            "repo_id": 305,
+            "owner": "nodate-org",
+            "name": "nodate-repo",
+            "description": "Valid tool description",
+            "primary_language": "Python",
+            "stars": 5000,
+            "forks": 500,  # 10% -> 20 pts
+            "open_issues": 50,  # 1% -> 25 pts
+            "creation_date": "2020-01-01T00:00:00Z",
+            "last_updated_date": None,  # Missing date!
+            "url": "https://github.com/nodate-org/nodate-repo",
+        }
+    )
+
+    transformer = GitPulseTransformer(db_manager=test_db_manager, output_dir=tmp_path / "proc")
+    health_df = transformer.compute_repository_health_scores()
+
+    assert len(health_df) == 1
+    row = health_df.iloc[0]
+    assert row["recency_status"] == "DATA_UNAVAILABLE"
+    assert row["recency_max"] == 0
+    # Available weight excludes 35 pts recency and 10 pts trend -> 25 + 20 + 10 = 55 pts
+    assert row["evaluated_weight"] == 55
+    assert row["data_coverage_pct"] == 55
+    # 25 + 20 + 10 = 55 earned out of 55 available -> 100% normalized score!
+    assert row["health_score"] == 100
+    assert row["health_grade"] == "A"
+
+
+def test_health_score_single_and_zero_snapshot_fallbacks(populated_transformer):
+    """Test that single-snapshot and zero-snapshot repos exclude trend weight without penalty."""
+    health_df = populated_transformer.compute_repository_health_scores()
+
+    # Repo 102 has 1 snapshot
+    row_102 = health_df[health_df["repo_id"] == 102].iloc[0]
+    assert row_102["trend_status"] == "INSUFFICIENT_DATA"
+    assert row_102["trend_max"] == 0
+    assert row_102["data_coverage_pct"] == 90
+    assert pd.notna(row_102["health_score"])
+
+    # Repo 103 has 0 snapshots
+    row_103 = health_df[health_df["repo_id"] == 103].iloc[0]
+    assert row_103["trend_status"] == "INSUFFICIENT_DATA"
+    assert row_103["trend_max"] == 0
+    assert row_103["data_coverage_pct"] == 90
+
+
+def test_health_score_empty_database(test_db_manager, tmp_path):
+    """Test health scoring on an empty database returns empty DataFrame with schema intact."""
+    transformer = GitPulseTransformer(db_manager=test_db_manager, output_dir=tmp_path / "proc")
+    health_df = transformer.compute_repository_health_scores()
+
+    assert health_df.empty
+    assert "health_score" in health_df.columns
+    assert "health_grade" in health_df.columns
+    assert "data_coverage_pct" in health_df.columns
+    assert "recency_status" in health_df.columns
+
+
+def test_health_score_csv_export(populated_transformer):
+    """Test repository_health.csv export in export_all()."""
+    exported = populated_transformer.export_all()
+    assert "repository_health" in exported
+
+    health_file = exported["repository_health"]
+    assert health_file.exists()
+    assert health_file.stat().st_size > 0
+
+    df_loaded = pd.read_csv(health_file)
+    assert not df_loaded.empty
+    assert "health_score" in df_loaded.columns
+    assert "health_grade" in df_loaded.columns
