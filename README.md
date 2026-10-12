@@ -33,6 +33,14 @@ The entire system runs on a local machine, using only the unauthenticated GitHub
 
 ---
 
+## 📊 Dashboard Preview
+
+![GitPulse Dashboard Overview](docs/screenshots/dashboard-overview.png)
+
+*The GitPulse interactive dark-themed dashboard displaying executive repository KPIs, rankings, language analytics, repository health scores, and pipeline status.*
+
+---
+
 ## 🏗️ Architecture
 
 ```mermaid
