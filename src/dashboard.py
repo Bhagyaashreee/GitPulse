@@ -742,9 +742,51 @@ def render_historical_trends(data: Dict[str, pd.DataFrame]) -> None:
         )
         return
 
-    # Check if delta is zero across collections
+    # Multi-snapshot analytics: Calculate net deltas from earliest to latest snapshot
     first_snap = repo_snapshots.iloc[0]
     last_snap = repo_snapshots.iloc[-1]
+    net_stars = int(last_snap["stars"]) - int(first_snap["stars"])
+    net_forks = int(last_snap["forks"]) - int(first_snap["forks"])
+    net_issues = int(last_snap["open_issues"]) - int(first_snap["open_issues"])
+
+    # KPI Metric Cards for Net Changes
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric(
+            label="Latest Stars",
+            value=f"{int(last_snap['stars']):,}",
+            delta=f"{net_stars:+d} net change" if net_stars != 0 else "0 change",
+        )
+    with k2:
+        st.metric(
+            label="Latest Forks",
+            value=f"{int(last_snap['forks']):,}",
+            delta=f"{net_forks:+d} net change" if net_forks != 0 else "0 change",
+        )
+    with k3:
+        st.metric(
+            label="Open Issues",
+            value=f"{int(last_snap['open_issues']):,}",
+            delta=f"{net_issues:+d} net change" if net_issues != 0 else "0 change",
+            delta_color="inverse",
+        )
+    with k4:
+        st.metric(
+            label="Snapshots Tracked",
+            value=str(snapshot_count),
+            delta=f"Span: {snapshot_count} collections",
+            delta_color="off",
+        )
+
+    # Metric Selector
+    metric_choice = st.radio(
+        "Trend Metric View",
+        options=["All Metrics", "Stars Only", "Forks Only", "Issues Only"],
+        horizontal=True,
+        key="trend_metric_view_selector",
+    )
+
+    # Check if delta is zero across collections
     is_delta_zero = (
         first_snap["stars"] == last_snap["stars"]
         and first_snap["forks"] == last_snap["forks"]
@@ -759,41 +801,44 @@ def render_historical_trends(data: Dict[str, pd.DataFrame]) -> None:
     # Plot metric trend across collection timestamps
     fig_trend = go.Figure()
 
-    fig_trend.add_trace(
-        go.Scatter(
-            x=repo_snapshots["collection_timestamp"],
-            y=repo_snapshots["stars"],
-            mode="lines+markers",
-            name="Stars",
-            line=dict(color="#38BDF8", width=3),
-            marker=dict(size=8),
-            hovertemplate="%{x}<br>Stars: %{y:,}<extra></extra>",
+    if metric_choice in ["All Metrics", "Stars Only"]:
+        fig_trend.add_trace(
+            go.Scatter(
+                x=repo_snapshots["collection_timestamp"],
+                y=repo_snapshots["stars"],
+                mode="lines+markers",
+                name="Stars",
+                line=dict(color="#38BDF8", width=3),
+                marker=dict(size=8),
+                hovertemplate="%{x}<br>Stars: %{y:,}<extra></extra>",
+            )
         )
-    )
 
-    fig_trend.add_trace(
-        go.Scatter(
-            x=repo_snapshots["collection_timestamp"],
-            y=repo_snapshots["forks"],
-            mode="lines+markers",
-            name="Forks",
-            line=dict(color="#818CF8", width=2),
-            marker=dict(size=6),
-            hovertemplate="%{x}<br>Forks: %{y:,}<extra></extra>",
+    if metric_choice in ["All Metrics", "Forks Only"]:
+        fig_trend.add_trace(
+            go.Scatter(
+                x=repo_snapshots["collection_timestamp"],
+                y=repo_snapshots["forks"],
+                mode="lines+markers",
+                name="Forks",
+                line=dict(color="#818CF8", width=2),
+                marker=dict(size=6),
+                hovertemplate="%{x}<br>Forks: %{y:,}<extra></extra>",
+            )
         )
-    )
 
-    fig_trend.add_trace(
-        go.Scatter(
-            x=repo_snapshots["collection_timestamp"],
-            y=repo_snapshots["open_issues"],
-            mode="lines+markers",
-            name="Open Issues",
-            line=dict(color="#F43F5E", width=2, dash="dot"),
-            marker=dict(size=6),
-            hovertemplate="%{x}<br>Issues: %{y:,}<extra></extra>",
+    if metric_choice in ["All Metrics", "Issues Only"]:
+        fig_trend.add_trace(
+            go.Scatter(
+                x=repo_snapshots["collection_timestamp"],
+                y=repo_snapshots["open_issues"],
+                mode="lines+markers",
+                name="Open Issues",
+                line=dict(color="#F43F5E", width=2, dash="dot"),
+                marker=dict(size=6),
+                hovertemplate="%{x}<br>Issues: %{y:,}<extra></extra>",
+            )
         )
-    )
 
     fig_trend.update_layout(
         **PLOTLY_LAYOUT_DEFAULTS,
@@ -803,6 +848,43 @@ def render_historical_trends(data: Dict[str, pd.DataFrame]) -> None:
         hovermode="x unified",
     )
     st.plotly_chart(fig_trend, width="stretch")
+
+    # Chronological Snapshot Audit Table with Incremental Changes
+    transformer = GitPulseTransformer()
+    audit_history = transformer.compute_repository_snapshot_history(
+        selected_repo_id,
+        snapshots_df=raw_snaps,
+    )
+
+    if not audit_history.empty:
+        st.markdown("**Chronological Snapshot History & Incremental Deltas**")
+        audit_table = audit_history.copy()
+        audit_table["Collection Timestamp (UTC)"] = audit_table["collection_timestamp"]
+        audit_table["Stars"] = audit_table["stars"].apply(lambda v: f"{v:,}")
+        audit_table["Δ Stars"] = audit_table["delta_stars"].apply(lambda v: f"{v:+d}" if v != 0 else "0")
+        audit_table["Forks"] = audit_table["forks"].apply(lambda v: f"{v:,}")
+        audit_table["Δ Forks"] = audit_table["delta_forks"].apply(lambda v: f"{v:+d}" if v != 0 else "0")
+        audit_table["Open Issues"] = audit_table["open_issues"].apply(lambda v: f"{v:,}")
+        audit_table["Δ Issues"] = audit_table["delta_open_issues"].apply(lambda v: f"{v:+d}" if v != 0 else "0")
+        audit_table["Star Velocity (stars/day)"] = audit_table["star_velocity_per_day"].apply(
+            lambda v: f"{v:+.1f}" if v != 0.0 else "0.0"
+        )
+
+        display_cols = [
+            "Collection Timestamp (UTC)",
+            "Stars",
+            "Δ Stars",
+            "Forks",
+            "Δ Forks",
+            "Open Issues",
+            "Δ Issues",
+            "Star Velocity (stars/day)",
+        ]
+        st.dataframe(
+            audit_table[display_cols],
+            width="stretch",
+            hide_index=True,
+        )
 
 
 # -----------------------------------------------------------------------------

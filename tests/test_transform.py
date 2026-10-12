@@ -275,3 +275,103 @@ def test_export_all_csv_files(populated_transformer, tmp_path):
         # Verify readability with pandas
         loaded_df = pd.read_csv(file_path)
         assert not loaded_df.empty
+
+
+def test_snapshot_history_three_snapshots_incremental_deltas(populated_transformer):
+    """Test consecutive snapshot deltas, negative issue deltas, and star velocity across 3 snapshots."""
+    # Repo 101 has 3 snapshots in populated_transformer:
+    # 1: 2026-10-01T10:00:00Z -> stars: 7500, forks: 380, issues: 30
+    # 2: 2026-10-05T10:00:00Z -> stars: 7800, forks: 390, issues: 28
+    # 3: 2026-10-10T10:00:00Z -> stars: 8000, forks: 400, issues: 25
+    history_df = populated_transformer.compute_repository_snapshot_history(101)
+
+    assert len(history_df) == 3
+
+    # Baseline snapshot (0)
+    snap0 = history_df.iloc[0]
+    assert snap0["stars"] == 7500
+    assert snap0["delta_stars"] == 0
+    assert snap0["delta_forks"] == 0
+    assert snap0["delta_open_issues"] == 0
+    assert snap0["cumulative_delta_stars"] == 0
+    assert snap0["elapsed_seconds"] == 0.0
+    assert snap0["star_velocity_per_day"] == 0.0
+
+    # Snapshot 1 (4 days elapsed)
+    snap1 = history_df.iloc[1]
+    assert snap1["stars"] == 7800
+    assert snap1["delta_stars"] == 300  # 7800 - 7500
+    assert snap1["delta_forks"] == 10   # 390 - 380
+    assert snap1["delta_open_issues"] == -2  # 28 - 30 (negative issue delta!)
+    assert snap1["cumulative_delta_stars"] == 300
+    assert snap1["elapsed_seconds"] == 4 * 86400.0
+    assert snap1["star_velocity_per_day"] == 75.0  # 300 stars / 4 days
+
+    # Snapshot 2 (5 days elapsed)
+    snap2 = history_df.iloc[2]
+    assert snap2["stars"] == 8000
+    assert snap2["delta_stars"] == 200  # 8000 - 7800
+    assert snap2["delta_forks"] == 10   # 400 - 390
+    assert snap2["delta_open_issues"] == -3  # 25 - 28 (negative issue delta!)
+    assert snap2["cumulative_delta_stars"] == 500  # 8000 - 7500
+    assert snap2["cumulative_delta_forks"] == 20   # 400 - 380
+    assert snap2["cumulative_delta_open_issues"] == -5  # 25 - 30
+    assert snap2["elapsed_seconds"] == 5 * 86400.0
+    assert snap2["star_velocity_per_day"] == 40.0  # 200 stars / 5 days
+
+
+def test_snapshot_history_unchanged_metrics_and_zero_elapsed_time(test_db_manager, tmp_path):
+    """Test safe handling of unchanged metrics and zero elapsed time between snapshots."""
+    test_db_manager.upsert_repository(
+        {
+            "repo_id": 201,
+            "owner": "test",
+            "name": "zero-time-repo",
+            "description": "Test zero elapsed time",
+            "primary_language": "Python",
+            "stars": 500,
+            "forks": 50,
+            "open_issues": 10,
+            "creation_date": "2022-01-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",
+            "url": "https://github.com/test/zero-time-repo",
+        }
+    )
+
+    # Insert two snapshots with the identical timestamp and unchanged metrics
+    test_db_manager.insert_snapshot(
+        repo_id=201, stars=500, forks=50, open_issues=10, collection_timestamp="2026-10-10T12:00:00Z"
+    )
+    test_db_manager.insert_snapshot(
+        repo_id=201, stars=500, forks=50, open_issues=10, collection_timestamp="2026-10-10T12:00:00Z"
+    )
+
+    transformer = GitPulseTransformer(db_manager=test_db_manager, output_dir=tmp_path / "proc")
+    history_df = transformer.compute_repository_snapshot_history(201)
+
+    assert len(history_df) == 2
+    snap1 = history_df.iloc[1]
+    assert snap1["delta_stars"] == 0
+    assert snap1["delta_forks"] == 0
+    assert snap1["delta_open_issues"] == 0
+    assert snap1["elapsed_seconds"] == 0.0
+    # Division by zero avoided
+    assert snap1["star_velocity_per_day"] == 0.0
+
+
+def test_snapshot_history_single_and_zero_snapshot_fallbacks(populated_transformer):
+    """Test fallbacks when repository has 0 or 1 snapshot."""
+    # Repo 103 has 0 snapshots
+    df_0 = populated_transformer.compute_repository_snapshot_history(103)
+    assert df_0.empty
+    assert "delta_stars" in df_0.columns
+    assert "star_velocity_per_day" in df_0.columns
+
+    # Repo 102 has 1 snapshot
+    df_1 = populated_transformer.compute_repository_snapshot_history(102)
+    assert len(df_1) == 1
+    assert df_1.iloc[0]["delta_stars"] == 0
+    assert df_1.iloc[0]["delta_forks"] == 0
+    assert df_1.iloc[0]["delta_open_issues"] == 0
+    assert df_1.iloc[0]["elapsed_seconds"] == 0.0
+    assert df_1.iloc[0]["star_velocity_per_day"] == 0.0

@@ -398,6 +398,124 @@ class GitPulseTransformer:
         result_df = pd.DataFrame(records, columns=cols)
         return result_df
 
+    def compute_repository_snapshot_history(
+        self,
+        repo_id: int,
+        snapshots_df: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """Calculate chronological consecutive snapshot deltas and growth velocity for a repository.
+
+        Computes incremental deltas for stars, forks, and open issues between consecutive
+        snapshots, as well as star growth velocity (stars/day) based on actual elapsed time.
+        Safely handles zero elapsed time, single snapshots, or repositories without snapshots.
+
+        Args:
+            repo_id: The integer ID of the repository.
+            snapshots_df: Optional preloaded snapshots DataFrame. If None, loaded via load_raw_snapshots().
+
+        Returns:
+            DataFrame with chronological snapshot progression, step deltas, cumulative deltas,
+            elapsed seconds, and star velocity.
+        """
+        cols = [
+            "snapshot_id",
+            "repo_id",
+            "collection_timestamp",
+            "stars",
+            "forks",
+            "open_issues",
+            "delta_stars",
+            "delta_forks",
+            "delta_open_issues",
+            "cumulative_delta_stars",
+            "cumulative_delta_forks",
+            "cumulative_delta_open_issues",
+            "elapsed_seconds",
+            "star_velocity_per_day",
+        ]
+
+        if snapshots_df is not None:
+            snaps_df = snapshots_df.copy()
+        else:
+            snaps_df = self.load_raw_snapshots()
+
+        if snaps_df.empty:
+            return pd.DataFrame(columns=cols)
+
+        # Filter by repo_id and sort chronologically
+        repo_snaps = snaps_df[snaps_df["repo_id"] == int(repo_id)].sort_values(
+            by=["collection_timestamp", "id"], ascending=[True, True]
+        ).reset_index(drop=True)
+
+        if repo_snaps.empty:
+            return pd.DataFrame(columns=cols)
+
+        records: List[Dict[str, Any]] = []
+        base_snap = repo_snaps.iloc[0]
+
+        for i, snap in repo_snaps.iterrows():
+            s_id = int(snap["id"])
+            c_ts = str(snap["collection_timestamp"])
+            stars = int(snap["stars"])
+            forks = int(snap["forks"])
+            issues = int(snap["open_issues"])
+
+            if i == 0:
+                delta_stars = 0
+                delta_forks = 0
+                delta_issues = 0
+                cum_stars = 0
+                cum_forks = 0
+                cum_issues = 0
+                elapsed_sec = 0.0
+                velocity_per_day = 0.0
+            else:
+                prev = repo_snaps.iloc[i - 1]
+                delta_stars = stars - int(prev["stars"])
+                delta_forks = forks - int(prev["forks"])
+                delta_issues = issues - int(prev["open_issues"])
+
+                cum_stars = stars - int(base_snap["stars"])
+                cum_forks = forks - int(base_snap["forks"])
+                cum_issues = issues - int(base_snap["open_issues"])
+
+                # Calculate actual elapsed time between consecutive snapshots
+                t_prev = pd.to_datetime(prev["collection_timestamp"], errors="coerce", utc=True)
+                t_curr = pd.to_datetime(snap["collection_timestamp"], errors="coerce", utc=True)
+
+                if pd.notna(t_prev) and pd.notna(t_curr):
+                    elapsed_sec = max(0.0, float((t_curr - t_prev).total_seconds()))
+                else:
+                    elapsed_sec = 0.0
+
+                # Safe velocity calculation: prevent division by zero or negative intervals
+                if elapsed_sec > 0.0:
+                    elapsed_days = elapsed_sec / 86400.0
+                    velocity_per_day = round(float(delta_stars) / elapsed_days, 2)
+                else:
+                    velocity_per_day = 0.0
+
+            records.append(
+                {
+                    "snapshot_id": s_id,
+                    "repo_id": int(repo_id),
+                    "collection_timestamp": c_ts,
+                    "stars": stars,
+                    "forks": forks,
+                    "open_issues": issues,
+                    "delta_stars": delta_stars,
+                    "delta_forks": delta_forks,
+                    "delta_open_issues": delta_issues,
+                    "cumulative_delta_stars": cum_stars,
+                    "cumulative_delta_forks": cum_forks,
+                    "cumulative_delta_open_issues": cum_issues,
+                    "elapsed_seconds": round(elapsed_sec, 1),
+                    "star_velocity_per_day": velocity_per_day,
+                }
+            )
+
+        return pd.DataFrame(records, columns=cols)
+
     def export_all(self) -> Dict[str, Path]:
         """Compute all analytical views and export them to CSV files in data/processed/.
 

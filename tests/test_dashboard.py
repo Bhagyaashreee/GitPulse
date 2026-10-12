@@ -5,7 +5,7 @@ import pytest
 import pandas as pd
 
 from src.database import DatabaseManager
-from src.dashboard import load_analytics_data, refresh_pipeline
+from src.dashboard import load_analytics_data, refresh_pipeline, render_historical_trends
 
 
 @pytest.fixture
@@ -158,3 +158,128 @@ def test_trigger_ingestion_rate_limited(tmp_path):
 
     assert success is False
     assert "rate limit reached" in msg.lower()
+
+
+def test_render_historical_trends_with_multi_snapshots(tmp_path):
+    """Test dashboard historical trend rendering across multiple chronological snapshots."""
+    from unittest.mock import MagicMock, patch
+
+    test_db = tmp_path / "trends_multi.db"
+    db_mgr = DatabaseManager(db_path=test_db)
+
+    # Insert sample repository
+    db_mgr.upsert_repository(
+        {
+            "repo_id": 701,
+            "owner": "trend-org",
+            "name": "pulse-analytics",
+            "description": "Multi snapshot trend testing",
+            "primary_language": "Python",
+            "stars": 1100,
+            "forks": 110,
+            "open_issues": 8,
+            "creation_date": "2021-01-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",
+            "url": "https://github.com/trend-org/pulse-analytics",
+        }
+    )
+
+    # Insert 3 chronological snapshots
+    db_mgr.insert_snapshot(
+        repo_id=701, stars=1000, forks=100, open_issues=10, collection_timestamp="2026-10-01T00:00:00Z"
+    )
+    db_mgr.insert_snapshot(
+        repo_id=701, stars=1050, forks=105, open_issues=9, collection_timestamp="2026-10-02T00:00:00Z"
+    )
+    db_mgr.insert_snapshot(
+        repo_id=701, stars=1100, forks=110, open_issues=8, collection_timestamp="2026-10-03T00:00:00Z"
+    )
+
+    data = load_analytics_data(str(test_db))
+    assert not data["raw_snaps"].empty
+    assert len(data["raw_snaps"]) == 3
+
+    # Mock streamlit components to verify render_historical_trends executes without exceptions
+    with patch("src.dashboard.st") as mock_st:
+        mock_st.selectbox.return_value = "trend-org/pulse-analytics"
+        mock_st.columns.return_value = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        mock_st.radio.return_value = "All Metrics"
+
+        render_historical_trends(data)
+
+        # Verify selector, metrics, plotly chart, and dataframe were rendered
+        assert mock_st.selectbox.called
+        assert mock_st.plotly_chart.called
+        assert mock_st.dataframe.called
+
+
+def test_render_historical_trends_single_and_zero_snapshot_fallbacks(tmp_path):
+    """Test dashboard historical trends fallbacks for 0 snapshots, 1 snapshot, and empty database."""
+    from unittest.mock import patch
+
+    test_db = tmp_path / "trends_fallbacks.db"
+    db_mgr = DatabaseManager(db_path=test_db)
+
+    # Repo 801: 1 snapshot
+    db_mgr.upsert_repository(
+        {
+            "repo_id": 801,
+            "owner": "single-org",
+            "name": "single-snap",
+            "description": "Repo with single snapshot",
+            "primary_language": "Python",
+            "stars": 500,
+            "forks": 50,
+            "open_issues": 5,
+            "creation_date": "2022-01-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",
+            "url": "https://github.com/single-org/single-snap",
+        }
+    )
+    db_mgr.insert_snapshot(
+        repo_id=801, stars=500, forks=50, open_issues=5, collection_timestamp="2026-10-01T00:00:00Z"
+    )
+
+    # Repo 802: 0 snapshots
+    db_mgr.upsert_repository(
+        {
+            "repo_id": 802,
+            "owner": "zero-org",
+            "name": "zero-snap",
+            "description": "Repo with zero snapshots",
+            "primary_language": "Rust",
+            "stars": 300,
+            "forks": 30,
+            "open_issues": 3,
+            "creation_date": "2023-01-01T00:00:00Z",
+            "last_updated_date": "2026-10-10T00:00:00Z",
+            "url": "https://github.com/zero-org/zero-snap",
+        }
+    )
+
+    data = load_analytics_data(str(test_db))
+
+    # 1. Test single snapshot repository fallback
+    with patch("src.dashboard.st") as mock_st:
+        mock_st.selectbox.return_value = "single-org/single-snap"
+        render_historical_trends(data)
+        assert mock_st.info.called
+        # Check that informative single-snapshot guidance was output
+        assert any("Only 1 snapshot recorded" in str(arg) for call in mock_st.info.call_args_list for arg in call[0])
+
+    # 2. Test zero snapshot repository fallback
+    with patch("src.dashboard.st") as mock_st:
+        mock_st.selectbox.return_value = "zero-org/zero-snap"
+        render_historical_trends(data)
+        assert mock_st.warning.called
+        assert any("No historical snapshots found" in str(arg) for call in mock_st.warning.call_args_list for arg in call[0])
+
+    # 3. Test empty database fallback
+    empty_data = {
+        "top_repos": pd.DataFrame(),
+        "raw_snaps": pd.DataFrame(),
+        "history": pd.DataFrame(),
+    }
+    with patch("src.dashboard.st") as mock_st:
+        render_historical_trends(empty_data)
+        assert mock_st.info.called
