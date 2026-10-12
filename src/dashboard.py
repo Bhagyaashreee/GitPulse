@@ -321,15 +321,16 @@ def render_header(pipeline_runs: pd.DataFrame) -> None:
     """Render top header with system status pill and last successful run info."""
     col1, col2 = st.columns([2.5, 1.5])
     with col1:
-        st.markdown(
-            """
-            <div class="dashboard-header">
-                <h1 class="dashboard-title">⚡ GitPulse Analytics</h1>
-                <div class="dashboard-subtitle">Local-First GitHub ELT Intelligence & Engineering Metrics</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+        header_title_html = (
+            '<div class="dashboard-header">'
+            '<h1 class="dashboard-title">⚡ GitPulse Analytics</h1>'
+            '<div class="dashboard-subtitle">Local-First GitHub ELT Intelligence & Engineering Metrics</div>'
+            '</div>'
         )
+        if hasattr(st, "html"):
+            st.html(header_title_html)
+        else:
+            st.markdown(header_title_html, unsafe_allow_html=True)
     with col2:
         if not pipeline_runs.empty:
             latest = pipeline_runs.iloc[0]
@@ -358,20 +359,20 @@ def render_header(pipeline_runs: pd.DataFrame) -> None:
                     f'</div>'
                 )
 
-            st.markdown(
-                f"""
-                <div style="text-align: right; padding-top: 0.8rem;">
-                    <div>
-                        <span class="{badge_class}">Latest Run #{latest_id}: {latest_status}</span>
-                    </div>
-                    {last_successful_html}
-                    <div style="font-size: 0.75rem; color: #94A3B8; margin-top: 0.25rem;">
-                        Total Runs: {runs_count} | Local SQLite Storage
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            header_status_html = (
+                f'<div style="text-align: right; padding-top: 0.8rem;">'
+                f'<div><span class="{badge_class}">Latest Run #{latest_id}: {latest_status}</span></div>'
+                f'{last_successful_html}'
+                f'<div style="font-size: 0.75rem; color: #94A3B8; margin-top: 0.25rem;">'
+                f'Total Runs: {runs_count} | Local SQLite Storage'
+                f'</div>'
+                f'</div>'
             )
+
+            if hasattr(st, "html"):
+                st.html(header_status_html)
+            else:
+                st.markdown(header_status_html, unsafe_allow_html=True)
 
 
 def render_overview(data: Dict[str, pd.DataFrame]) -> None:

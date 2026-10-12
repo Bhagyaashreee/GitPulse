@@ -8,6 +8,7 @@ from src.database import DatabaseManager
 from src.dashboard import (
     load_analytics_data,
     refresh_pipeline,
+    render_header,
     render_historical_trends,
     render_repository_activity,
 )
@@ -322,3 +323,70 @@ def test_render_repository_activity_with_health_scoring(test_dashboard_db):
         assert mock_st.dataframe.called
         assert mock_st.metric.called
         assert mock_st.plotly_chart.called
+
+
+def test_render_header_success_and_failure_states():
+    """Test render_header renders cleanly for both COMPLETED and FAILED states without raw HTML code blocks."""
+    from unittest.mock import MagicMock, patch
+
+    # Case 1: Latest run is COMPLETED (e.g. Run 4)
+    completed_runs = pd.DataFrame(
+        [
+            {
+                "run_id": 4,
+                "status": "COMPLETED",
+                "successful_repositories": 3,
+                "error_details": None,
+            },
+            {
+                "run_id": 3,
+                "status": "FAILED",
+                "successful_repositories": 0,
+                "error_details": "404 not found",
+            },
+        ]
+    )
+
+    with patch("src.dashboard.st") as mock_st:
+        mock_st.columns.return_value = [MagicMock(), MagicMock()]
+        render_header(completed_runs)
+
+        # Verify that either st.html or st.markdown was called
+        calls = mock_st.html.call_args_list if mock_st.html.called else mock_st.markdown.call_args_list
+        assert len(calls) > 0
+        rendered_texts = [str(c[0][0]) for c in calls]
+        combined = " ".join(rendered_texts)
+        assert "Latest Run #4: COMPLETED" in combined
+        assert "badge-pill-success" in combined
+        assert "Total Runs: 2" in combined
+        # Verify no unintended indentation or raw code block artifacts
+        assert "\n    " not in combined or "```" not in combined
+
+    # Case 2: Latest run is FAILED with prior COMPLETED run (e.g. Run 3 FAILED, Run 2 COMPLETED)
+    failed_runs = pd.DataFrame(
+        [
+            {
+                "run_id": 3,
+                "status": "FAILED",
+                "successful_repositories": 0,
+                "error_details": "404 not found",
+            },
+            {
+                "run_id": 2,
+                "status": "COMPLETED",
+                "successful_repositories": 3,
+                "error_details": None,
+            },
+        ]
+    )
+
+    with patch("src.dashboard.st") as mock_st:
+        mock_st.columns.return_value = [MagicMock(), MagicMock()]
+        render_header(failed_runs)
+
+        calls = mock_st.html.call_args_list if mock_st.html.called else mock_st.markdown.call_args_list
+        rendered_texts = [str(c[0][0]) for c in calls]
+        combined = " ".join(rendered_texts)
+        assert "Latest Run #3: FAILED" in combined
+        assert "badge-pill-danger" in combined
+        assert "Last Successful: Run #2" in combined
